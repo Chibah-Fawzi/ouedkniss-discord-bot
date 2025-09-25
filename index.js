@@ -10,6 +10,7 @@ const {
 const axios = require("axios");
 const fs = require("fs");
 const path = require("path");
+const logger = require("./logger");
 require("dotenv").config();
 const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
 const TARGET_CHANNEL_ID = process.env.TARGET_CHANNEL_ID;
@@ -193,15 +194,32 @@ async function registerCommands() {
         .setRequired(false)
     );
 
+  const unfavoriteCmd = new SlashCommandBuilder()
+    .setName("unfavorite")
+    .setDescription("Remove a listing from your favorites by id")
+    .addStringOption((opt) =>
+      opt
+        .setName("id")
+        .setDescription("Listing id (e.g., 50542423)")
+        .setRequired(true)
+    );
+
   const rest = new REST({ version: "10" }).setToken(DISCORD_BOT_TOKEN);
-  const body = [favoriteCmd.toJSON()];
+  const body = [favoriteCmd.toJSON(), unfavoriteCmd.toJSON()];
   try {
     await rest.put(Routes.applicationGuildCommands(client.user.id, GUILD_ID), {
       body,
     });
     console.log("Registered guild slash commands: /favorite");
+    logger.info("commands_registered", {
+      commands: ["favorite", "unfavorite"],
+      guildId: GUILD_ID,
+    });
   } catch (e) {
     console.error("Failed to register slash commands", e);
+    logger.error("commands_register_failed", {
+      message: String(e?.message || e),
+    });
   }
 }
 
@@ -220,9 +238,15 @@ async function checkAndSendNewListings(channel) {
         const slugPath = (item.slug || "").startsWith("/")
           ? (item.slug || "").slice(1)
           : item.slug || "";
+        const offerUrl = `https://www.ouedkniss.com/${slugPath}-d${item.id}`;
         console.log(
-          `Sent offer to Discord: id=${item.id}, title="${item.title}", url=https://www.ouedkniss.com/${slugPath}-d${item.id}`
+          `Sent offer to Discord: id=${item.id}, title="${item.title}", url=${offerUrl}`
         );
+        logger.info("offer_sent", {
+          id: String(item.id),
+          title: item.title,
+          url: offerUrl,
+        });
         postedIds.add(item.id);
         newCount++;
       }
@@ -232,15 +256,25 @@ async function checkAndSendNewListings(channel) {
         listings.length
       }, sent=${newCount}, skipped=${listings.length - newCount}`
     );
+    logger.info("poll_summary", {
+      fetched: listings.length,
+      sent: newCount,
+      skipped: listings.length - newCount,
+    });
     savePostedIds();
   } catch (error) {
     console.error("Error fetching or sending listings:", error);
+    logger.error("poll_error", {
+      message: String(error?.message || error),
+      stack: error?.stack,
+    });
   }
 }
 
 client.once("clientReady", async () => {
   console.log("Discord bot ready!");
   console.log("Started at : ", new Date().toUTCString());
+  logger.info("bot_ready", { startedAt: new Date().toISOString() });
   loadPostedIds();
 
   const channel = await client.channels.fetch(TARGET_CHANNEL_ID);
@@ -271,7 +305,11 @@ const {
 client.on("interactionCreate", async (interaction) => {
   try {
     if (!interaction.isChatInputCommand()) return;
-    if (interaction.commandName !== "favorite") return;
+    if (
+      interaction.commandName !== "favorite" &&
+      interaction.commandName !== "unfavorite"
+    )
+      return;
 
     const id = interaction.options.getString("id", true).trim();
     const note = interaction.options.getString("note") || "";
@@ -307,36 +345,94 @@ client.on("interactionCreate", async (interaction) => {
       timestamp: Date.now(),
     };
 
-    const favorites = readFavorites();
-    favorites.push(favorite);
-    writeFavorites(favorites);
+    if (interaction.commandName === "favorite") {
+      const embed = buildFavoriteEmbed(favorite);
 
-    const embed = buildFavoriteEmbed(favorite);
-
-    // Acknowledge to the user (ephemeral)
-    await interaction.reply({
-      content: `Saved favorite for listing d${id}.`,
-      ephemeral: true,
-    });
-
-    // Post to favorites channel if configured
-    if (FAVORITES_CHANNEL_ID) {
-      const favChannel = await client.channels
-        .fetch(FAVORITES_CHANNEL_ID)
-        .catch(() => null);
-      if (favChannel) {
-        await favChannel.send({ embeds: [embed] });
-      } else {
-        console.warn("Favorites channel not found or not accessible");
+      // Post to favorites channel if configured, and capture message id
+      if (FAVORITES_CHANNEL_ID) {
+        const favChannel = await client.channels
+          .fetch(FAVORITES_CHANNEL_ID)
+          .catch(() => null);
+        if (favChannel) {
+          const msg = await favChannel.send({ embeds: [embed] });
+          favorite.messageId = msg.id;
+          favorite.channelId = favChannel.id;
+        } else {
+          console.warn("Favorites channel not found or not accessible");
+        }
       }
+
+      const favorites = readFavorites();
+      favorites.push(favorite);
+      writeFavorites(favorites);
+
+      await interaction.reply({
+        content: `Saved ${item.title} as favorite with review: ${note}`,
+      });
+      logger.info("favorite_added", {
+        id,
+        userId: interaction.user.id,
+        title: item.title,
+        messageId: favorite.messageId,
+      });
+      return;
+    }
+
+    if (interaction.commandName === "unfavorite") {
+      const favorites = readFavorites();
+      const toRemove = favorites.filter(
+        (f) => String(f.id) === String(id) && f.userId === interaction.user.id
+      );
+
+      // Attempt to delete posted favorite messages
+      for (const fav of toRemove) {
+        try {
+          const channelId = fav.channelId || FAVORITES_CHANNEL_ID;
+          if (!channelId || !fav.messageId) continue;
+          const ch = await client.channels.fetch(channelId).catch(() => null);
+          if (ch) {
+            const msg = await ch.messages
+              .fetch(fav.messageId)
+              .catch(() => null);
+            if (msg) await msg.delete().catch(() => {});
+          }
+        } catch {}
+      }
+
+      const filtered = favorites.filter(
+        (f) =>
+          !(String(f.id) === String(id) && f.userId === interaction.user.id)
+      );
+      const removedCount = toRemove.length;
+      writeFavorites(filtered);
+
+      if (removedCount > 0) {
+        await interaction.reply({
+          content: `Removed ${item.title} from favorites.`,
+        });
+        logger.info("favorite_removed", {
+          id,
+          userId: interaction.user.id,
+          removedCount,
+        });
+      } else {
+        await interaction.reply({
+          content: `No favorite found for id : ${id} owned by you.`,
+        });
+      }
+      return;
     }
   } catch (err) {
     console.error("Error handling /favorite:", err);
+    logger.error("favorite_handler_error", {
+      message: String(err?.message || err),
+      stack: err?.stack,
+    });
     if (interaction.isRepliable()) {
       try {
         await interaction.reply({
           content: "Failed to save favorite.",
-          ephemeral: true,
+          flags: 64,
         });
       } catch {}
     }

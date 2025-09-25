@@ -60,12 +60,12 @@ You should see in the console:
 
 ### Favorite listings via slash command
 
-- Command: `/favorite`
-  - Options:
-    - `id` (required): listing id, e.g., `50542423`
-    - `note` (optional): your opinion/review
-- The bot stores favorites in `favorites.json` and posts a formatted embed in the channel set by `FAVORITES_CHANNEL_ID`.
-- Make sure `GUILD_ID` is set to register the guild slash command.
+- Commands:
+  - `/favorite id:<listingId> note:<optional>` — save a listing with your note
+  - `/unfavorite id:<listingId>` — remove your saved favorite by id
+- Storage: favorites are persisted in `favorites.json`.
+- Posting: favorites are also embedded and posted to `FAVORITES_CHANNEL_ID`.
+- Note: set `GUILD_ID` to register commands in your server.
 
 ### Tuning filters (optional)
 
@@ -91,6 +91,17 @@ pm2 save
 - Make sure `TARGET_CHANNEL_ID` points to the correct Discord channel.
 - `postedIds.json` stores posted listing IDs to avoid duplicates. Delete it to repost history.
 - Respect Ouedkniss terms of use. Keep reasonable intervals (10 min by default).
+
+### Logging
+
+- The bot writes structured JSON logs to a file.
+- Default file: `bot.log` in the project root. Override with `.env`:
+
+```env
+LOG_FILE=/path/to/your/bot.log
+```
+
+- Logged events include: bot startup, command registration, poll summaries, offers sent, favorites added/removed, and errors.
 
 ### Troubleshooting
 

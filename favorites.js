@@ -1,6 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const { EmbedBuilder } = require("discord.js");
+const logger = require("./logger");
 
 const FAVORITES_FILE = path.join(__dirname, "favorites.json");
 
@@ -16,6 +17,7 @@ function readFavorites() {
   try {
     return JSON.parse(raw);
   } catch {
+    logger.warn("favorites_parse_failed", {});
     return [];
   }
 }
@@ -40,7 +42,9 @@ function buildFavoriteEmbed({
   const embed = new EmbedBuilder()
     .setTitle(title || "Favorite listing")
     .setURL(url)
-    .setDescription(note ? `Reviewer: ${userTag}\n\n${note}` : undefined)
+    .setDescription(
+      note ? `Reviewer: ${userTag || "Unknown"}\n\n${note}` : null
+    )
     .addFields(
       {
         name: "Price",
