@@ -1,4 +1,12 @@
-const { Client, GatewayIntentBits, EmbedBuilder } = require("discord.js");
+const {
+  Client,
+  GatewayIntentBits,
+  EmbedBuilder,
+  SlashCommandBuilder,
+  REST,
+  Routes,
+  Collection,
+} = require("discord.js");
 const axios = require("axios");
 const fs = require("fs");
 const path = require("path");
@@ -6,6 +14,8 @@ require("dotenv").config();
 const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
 const TARGET_CHANNEL_ID = process.env.TARGET_CHANNEL_ID;
 const POSTED_IDS_FILE = path.join(__dirname, "postedIds.json");
+const FAVORITES_CHANNEL_ID = process.env.FAVORITES_CHANNEL_ID;
+const GUILD_ID = process.env.GUILD_ID;
 const POLL_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
 
 const client = new Client({
@@ -13,6 +23,8 @@ const client = new Client({
 });
 
 let postedIds = new Set();
+const commands = new Collection();
+const recentById = new Map();
 
 // Load posted IDs from file if exists
 function loadPostedIds() {
@@ -70,7 +82,17 @@ async function fetchOuedknissListings() {
         connected: false,
         delivery: null,
         regionIds: ["16"],
-        cityIds: ["566", "577", "578", "580", "583", "584", "594"],
+        cityIds: [
+          "566",
+          "577",
+          "578",
+          "580",
+          "583",
+          "584",
+          "594",
+          "595",
+          "608",
+        ],
         priceRange: [1, 8],
         exchange: null,
         hasPictures: true,
@@ -140,10 +162,47 @@ function createEmbed(item) {
         }`,
         inline: true,
       },
+      { name: "ID", value: String(item.id), inline: true },
       { name: "Store", value: item.store?.name || "N/A", inline: true }
     )
     .setImage(item.defaultMedia?.mediaUrl || null)
     .setTimestamp(new Date(item.createdAt));
+}
+
+// Register slash commands (guild scoped)
+async function registerCommands() {
+  if (!DISCORD_BOT_TOKEN || !GUILD_ID) {
+    console.warn(
+      "Slash commands not registered: missing DISCORD_BOT_TOKEN or GUILD_ID"
+    );
+    return;
+  }
+  const favoriteCmd = new SlashCommandBuilder()
+    .setName("favorite")
+    .setDescription("Save a listing as favorite with a personal note")
+    .addStringOption((opt) =>
+      opt
+        .setName("id")
+        .setDescription("Listing id (e.g., 50542423)")
+        .setRequired(true)
+    )
+    .addStringOption((opt) =>
+      opt
+        .setName("note")
+        .setDescription("Your opinion about this offer")
+        .setRequired(false)
+    );
+
+  const rest = new REST({ version: "10" }).setToken(DISCORD_BOT_TOKEN);
+  const body = [favoriteCmd.toJSON()];
+  try {
+    await rest.put(Routes.applicationGuildCommands(client.user.id, GUILD_ID), {
+      body,
+    });
+    console.log("Registered guild slash commands: /favorite");
+  } catch (e) {
+    console.error("Failed to register slash commands", e);
+  }
 }
 
 async function checkAndSendNewListings(channel) {
@@ -154,6 +213,8 @@ async function checkAndSendNewListings(channel) {
     );
     let newCount = 0;
     for (const item of listings) {
+      // Keep a short-lived cache of recent listings by id for quick lookup when favoriting
+      recentById.set(String(item.id), item);
       if (!postedIds.has(item.id)) {
         await channel.send({ embeds: [createEmbed(item)] });
         const slugPath = (item.slug || "").startsWith("/")
@@ -188,6 +249,9 @@ client.once("clientReady", async () => {
     return;
   }
 
+  // Register slash commands after login
+  await registerCommands();
+
   // Run immediately once
   await checkAndSendNewListings(channel);
 
@@ -196,3 +260,85 @@ client.once("clientReady", async () => {
 });
 
 client.login(DISCORD_BOT_TOKEN);
+
+// Favorites handling
+const {
+  readFavorites,
+  writeFavorites,
+  buildFavoriteEmbed,
+} = require("./favorites");
+
+client.on("interactionCreate", async (interaction) => {
+  try {
+    if (!interaction.isChatInputCommand()) return;
+    if (interaction.commandName !== "favorite") return;
+
+    const id = interaction.options.getString("id", true).trim();
+    const note = interaction.options.getString("note") || "";
+
+    // Resolve listing: prefer recent cache, fallback to minimal stub
+    const item = recentById.get(id) || {
+      id,
+      title: `Listing d${id}`,
+      slug: "",
+      description: "",
+    };
+    const slugPath = (item.slug || "").startsWith("/")
+      ? (item.slug || "").slice(1)
+      : item.slug || "";
+    const url = `https://www.ouedkniss.com/${
+      slugPath ? slugPath + "-" : ""
+    }d${id}`;
+
+    const favorite = {
+      id,
+      url,
+      title: item.title,
+      pricePreview: item.pricePreview,
+      priceUnit: item.priceUnit,
+      priceType: item.priceType,
+      mediaUrl: item.defaultMedia?.mediaUrl || null,
+      city: item.cities?.[0]?.name,
+      region: item.cities?.[0]?.region?.name,
+      createdAt: item.createdAt || new Date().toISOString(),
+      note,
+      userId: interaction.user.id,
+      userTag: `${interaction.user.username}#${interaction.user.discriminator}`,
+      timestamp: Date.now(),
+    };
+
+    const favorites = readFavorites();
+    favorites.push(favorite);
+    writeFavorites(favorites);
+
+    const embed = buildFavoriteEmbed(favorite);
+
+    // Acknowledge to the user (ephemeral)
+    await interaction.reply({
+      content: `Saved favorite for listing d${id}.`,
+      ephemeral: true,
+    });
+
+    // Post to favorites channel if configured
+    if (FAVORITES_CHANNEL_ID) {
+      const favChannel = await client.channels
+        .fetch(FAVORITES_CHANNEL_ID)
+        .catch(() => null);
+      if (favChannel) {
+        await favChannel.send({ embeds: [embed] });
+      } else {
+        console.warn("Favorites channel not found or not accessible");
+      }
+    }
+  } catch (err) {
+    console.error("Error handling /favorite:", err);
+    if (interaction.isRepliable()) {
+      try {
+        await interaction.reply({
+          content: "Failed to save favorite.",
+          ephemeral: true,
+        });
+      } catch {}
+    }
+  }
+});

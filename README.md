@@ -41,6 +41,9 @@ Create a `.env` file in the project root:
 ```env
 DISCORD_BOT_TOKEN=your_discord_token
 TARGET_CHANNEL_ID=123456789012345678
+# Slash commands & favorites
+GUILD_ID=123456789012345678
+FAVORITES_CHANNEL_ID=234567890123456789
 ```
 
 ### Run the bot
@@ -54,6 +57,15 @@ You should see in the console:
 - “Discord bot ready!” on startup
 - For each sent listing: `Sent offer to Discord: id=..., title="...", url=...`
 - A summary every cycle: `Poll @ ... -> fetched=20, sent=2, skipped=18`
+
+### Favorite listings via slash command
+
+- Command: `/favorite`
+  - Options:
+    - `id` (required): listing id, e.g., `50542423`
+    - `note` (optional): your opinion/review
+- The bot stores favorites in `favorites.json` and posts a formatted embed in the channel set by `FAVORITES_CHANNEL_ID`.
+- Make sure `GUILD_ID` is set to register the guild slash command.
 
 ### Tuning filters (optional)
 
